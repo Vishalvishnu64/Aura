@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+/* The Electron window is transparent - never paint a page background.
+   Full-height root lets the card flex to whatever size the window has. */
+html,
+body,
+#root {
+  height: 100%;
+  background: transparent;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  /* Overlay feel: text isn't selectable except where explicitly allowed */
+  user-select: none;
+}
+
+textarea,
+input,
+.md-body {
+  user-select: text;
+}
+
+/* Frameless window: only the top drag bar moves the window; everything
+   interactive (buttons, inputs, links, selectable text) stays clickable. */
+button,
+textarea,
+input,
+a,
+.md-body {
+  -webkit-app-region: no-drag;
+}
+
+/* Slim overlay-style scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Minimal markdown typography without @tailwindcss/typography */
+.md-body :where(p) {
+  margin: 0.4em 0;
+  white-space: pre-wrap;
+}
+.md-body :where(h1, h2, h3, h4) {
+  font-weight: 600;
+  margin: 0.7em 0 0.3em;
+}
+.md-body :where(ul) {
+  list-style: disc;
+  padding-left: 1.25em;
+  margin: 0.35em 0;
+}
+.md-body :where(ol) {
+  list-style: decimal;
+  padding-left: 1.25em;
+  margin: 0.35em 0;
+}
+.md-body :where(li) {
+  margin: 0.15em 0;
+}
+.md-body :where(a) {
+  color: #a5b4fc;
+  text-decoration: underline;
+}
+.md-body :where(code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+}
+.md-body :where(:not(pre) > code) {
+  background: rgba(255, 255, 255, 0.09);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+.md-body :where(pre) {
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 0.65em 0.85em;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.md-body :where(pre > code) {
+  background: transparent;
+  padding: 0;
+  font-size: 12.5px;
+}
+.md-body :where(blockquote) {
+  border-left: 2px solid rgba(255, 255, 255, 0.18);
+  padding-left: 0.75em;
+  color: #a3a3a3;
+  margin: 0.4em 0;
+}
+.md-body :where(table) {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+}
+.md-body :where(th, td) {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 0.25em 0.6em;
+}
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body > :last-child {
+  margin-bottom: 0;
+}
