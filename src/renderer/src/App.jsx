@@ -62,6 +62,15 @@ function EyeOffIcon() {
   )
 }
 
+function SearchIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="7" />
+      <path d="m21 21-4.3-4.3" />
+    </svg>
+  )
+}
+
 /* ------------------------------------------------------------------ */
 /* Markdown renderer                                                   */
 /* ------------------------------------------------------------------ */
@@ -79,6 +88,33 @@ function Markdown({ content }) {
       </ReactMarkdown>
     </div>
   )
+}
+
+/* ------------------------------------------------------------------ */
+/* /recall - RAG bridge into the photographic-memory index             */
+/* ------------------------------------------------------------------ */
+
+const RECALL_RE = /^\/recall\s+(.+)$/i
+const RECALL_MAX_RESULTS = 10
+
+/**
+ * Format memory search hits into the context block sent to the AI.
+ * Snippets are flattened to one line each; UTC timestamps from SQLite are
+ * rendered in the user's local time. The [..] markers inside snippets show
+ * which terms matched - useful signal for the model, so they stay.
+ */
+function buildRecallPrompt(results, keyword) {
+  const lines = results.slice(0, RECALL_MAX_RESULTS).map((r) => {
+    const when = new Date(String(r.timestamp).replace(' ', 'T') + 'Z').toLocaleString()
+    const snippetText = String(r.snippet ?? '').replace(/\s+/g, ' ').trim()
+    return `- At ${when}: ${snippetText}`
+  })
+  return [
+    "Context from User's Screen History:",
+    ...lines,
+    '',
+    `User Request: Summarize what I was doing regarding "${keyword}".`
+  ].join('\n')
 }
 
 /* ------------------------------------------------------------------ */
@@ -309,7 +345,42 @@ export default function App() {
     const text = input.trim()
     if (!text || streaming) return
 
-    const history = [...messages, { role: 'user', content: text }]
+    // --- /recall slash command: RAG bridge into photographic memory ---
+    let outgoing = text
+    let recalledKeyword = null
+    const recallMatch = text.match(RECALL_RE)
+    if (recallMatch) {
+      const keyword = recallMatch[1].trim()
+      if (!keyword) {
+        setError('Usage: /recall <keyword>')
+        return
+      }
+      setError(null)
+      let results // assigned in the try block; catch always returns
+      try {
+        results = (await window.overlay?.searchMemory?.(keyword)) ?? []
+      } catch (err) {
+        setError(`Memory search failed: ${err.message}`)
+        return
+      }
+      if (results.length === 0) {
+        outgoing = `I tried to recall '${keyword}' from my screen history but found nothing.`
+      } else {
+        outgoing = buildRecallPrompt(results, keyword)
+        recalledKeyword = keyword
+      }
+    }
+
+    const history = [
+      ...messages,
+      {
+        role: 'user',
+        content: outgoing,
+        // Compact bubble text for recall turns; the AI still receives the
+        // full context block via `content` (and keeps it on follow-up turns).
+        ...(recalledKeyword ? { display: `/recall ${recalledKeyword}`, recalled: recalledKeyword } : {})
+      }
+    ]
     setInput('')
     setError(null)
     setStreaming(true)
@@ -373,7 +444,13 @@ export default function App() {
               message.role === 'user' ? (
                 <div key={i} className="flex justify-end">
                   <div className="max-w-[85%] whitespace-pre-wrap rounded-xl rounded-br-sm bg-indigo-500/90 px-3.5 py-2 text-[13.5px] leading-relaxed text-white">
-                    {message.content}
+                    {message.recalled && (
+                      <div className="mb-1 flex items-center gap-1 text-[10px] font-medium text-indigo-100/80">
+                        <SearchIcon />
+                        Recalled: {message.recalled}
+                      </div>
+                    )}
+                    {message.display ?? message.content}
                   </div>
                 </div>
               ) : (
@@ -521,7 +598,7 @@ export default function App() {
 
         {/* -------- hints -------- */}
         <div className="shrink-0 px-4 pb-2 text-center text-[10px] text-neutral-600">
-          Enter send &middot; Shift+Enter newline &middot; Esc hide &middot; Ctrl+Shift+Space summon &middot; Ctrl+Alt+S stealth &middot; drag edges to resize
+          Enter send &middot; Shift+Enter newline &middot; Esc hide &middot; Ctrl+Shift+Space summon &middot; Ctrl+Alt+S stealth &middot; /recall searches memory &middot; drag edges to resize
         </div>
       </div>
     </div>

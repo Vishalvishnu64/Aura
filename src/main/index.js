@@ -1,6 +1,7 @@
 import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, desktopCapturer, screen, nativeImage, shell } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { initMemoryService, stopMemoryService, searchMemory, setMemoryPaused } from './memoryService'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -196,6 +197,12 @@ function createTray() {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: `Toggle AI Overlay (${HOTKEY_LABEL})`, click: toggleWindow },
+      {
+        label: 'Pause Photographic Memory',
+        type: 'checkbox',
+        checked: false,
+        click: (item) => setMemoryPaused(item.checked)
+      },
       { type: 'separator' },
       {
         label: 'Quit',
@@ -269,6 +276,9 @@ function registerIpc() {
     }
     return contentProtection
   })
+
+  /** Full-text search over the photographic-memory index. */
+  ipcMain.handle('search-memory', (_event, keyword) => searchMemory(keyword))
 }
 
 // ---------------------------------------------------------------------------
@@ -287,9 +297,17 @@ if (!app.requestSingleInstanceLock()) {
     createWindow()
     createTray()
     globalShortcut.register(HOTKEY, toggleWindow)
+    try {
+      initMemoryService()
+    } catch (err) {
+      console.warn('[memory] init failed:', err.message)
+    }
   })
 
-  app.on('will-quit', () => globalShortcut.unregisterAll())
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll()
+    stopMemoryService()
+  })
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit()

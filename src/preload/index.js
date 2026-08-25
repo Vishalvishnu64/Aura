@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('overlay', {
   /** Stealth mode: pass true/false to toggle capture-exclusion, nothing to query. */
   setContentProtection: (enable) => ipcRenderer.invoke('set-content-protection', enable),
 
+  /** Full-text search over the photographic-memory index. */
+  searchMemory: (keyword) => ipcRenderer.invoke('search-memory', keyword),
+
   /**
    * Fired by main every time the overlay is summoned via hotkey/tray,
    * so the renderer can focus the input field.
