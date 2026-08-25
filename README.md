@@ -1,30 +1,35 @@
 # Aura 🌌
 
-> A stealthy, high-performance system-level AI assistant overlay built with Electron, React, and Vite.
+> A stealthy, high-performance system-level AI assistant overlay built with Electron, React, Vite, and a photographic memory.
 
-Aura lives quietly in your system tray and slides into view whenever you need it with a simple global shortcut (`Ctrl+Shift+Space` / `Cmd+Shift+Space`). Designed for fluid, non-intrusive workflows, it features screen context awareness, live voice/audio transcription, and screen-share exclusion mode (Stealth Mode).
+Aura lives quietly in your system tray and slides into view whenever you need it with a simple global shortcut (`Ctrl+Shift+Space` / `Cmd+Shift+Space`). It answers questions with streaming markdown, sees your screen, hears your microphone *and* system audio, remembers everything it saw — and stays invisible to screen recordings while doing it.
 
 ---
 
 ## ✨ Features
 
-- ⚡ **Instant Summon & Dismiss**: Toggle the overlay from anywhere using `Ctrl+Shift+Space` (or `Cmd+Shift+Space` on macOS). Press `Esc` or click outside to instantly hide.
-- 👁️‍🗨️ **Stealth Mode (Screen Share Exclusion)**: Built-in capture protection (`win.setContentProtection(true)`) ensures Aura remains invisible during OBS recordings, Discord screen shares, Zoom, or Teams calls. Toggle anytime with `Ctrl+Alt+S`.
-- 📸 **Screen Context Awareness**: Capture your current display with one click to send full visual context directly to vision-capable AI models. Also supports direct image pasting from clipboard.
-- 🎙️ **Live Audio Loopback & Transcription**: Stream audio from both your microphone and system loopback directly into input text.
-- 🎨 **Sleek Glassmorphic Design**: Frameless translucent window with dynamic auto-height adjustments, edge resizability, and full GitHub Flavored Markdown (GFM) support.
+- ⚡ **Instant Summon & Dismiss** — Toggle the overlay from anywhere with `Ctrl+Shift+Space`. `Esc` or click-away hides it; it keeps running quietly in the tray.
+- 👻 **Stealth Mode** — `win.setContentProtection(true)` makes Aura invisible to OBS, Discord, Zoom, and Teams captures (`WDA_EXCLUDEFROMCAPTURE` on Windows). Toggle with `Ctrl+Alt+S` or the composer badge.
+- 📸 **Vision Context** — One click grabs your screen as context for vision-capable models. Clipboard image paste works too (screenshot from anywhere → `Ctrl+V`).
+- 🎙️ **Dual-Channel Audio Loopback** — Captures your microphone *and* system output simultaneously, mixes them via the Web Audio API, and transcribes 5-second chunks through Whisper. Transcripts land straight in the input box.
+- 🧠 **Photographic Memory** — A background loop screenshots your screen every 15 seconds, OCRs it with tesseract.js, and stores it in a local SQLite database with full-text search (FTS5). Nothing leaves your machine.
+- 🔎 **`/recall` — RAG on your own screen history** — Type `/recall github` and Aura searches its memory index, attaches the matches as context, and the AI summarizes what you were doing.
+- 🎨 **Sleek Glassmorphic Design** — Frameless translucent window, drag-to-move, edge-resizable, auto-growing height, GFM markdown rendering, streaming caret.
 
 ---
 
-## ⌨️ Shortcuts & Hotkeys
+## ⌨️ Shortcuts & Commands
 
-| Shortcut | Description |
+| Input | Description |
 | :--- | :--- |
-| `Ctrl+Shift+Space` / `Cmd+Shift+Space` | Toggle Aura overlay visibility from anywhere in your OS |
-| `Ctrl+Alt+S` | Toggle **Stealth Mode** (screen capture exclusion on/off) |
+| `Ctrl+Shift+Space` / `Cmd+Shift+Space` | Toggle Aura from anywhere in the OS |
+| `Ctrl+Alt+S` | Toggle **Stealth Mode** (capture exclusion) |
+| `/recall <keyword>` | Search screen history and let the AI summarize it |
 | `Enter` | Send message |
-| `Shift + Enter` | Insert newline in composer |
+| `Shift+Enter` | Newline in composer |
 | `Esc` | Hide overlay |
+
+Composer badges: **Listen** (mic + system audio) · **Screen** (vision context) · **Stealth/Shared** (capture visibility).
 
 ---
 
@@ -32,42 +37,103 @@ Aura lives quietly in your system tray and slides into view whenever you need it
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v18+ recommended)
-- `npm` or `yarn`
+- [Node.js](https://nodejs.org/) 18+
+- On Windows, native-module builds may need [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (usually skipped — prebuilt binaries cover most setups)
 
 ### Installation
 
-1. **Clone the repository:**
+1. **Clone and install:**
    ```bash
    git clone https://github.com/Vishalvishnu64/Aura.git
    cd Aura
-   ```
-
-2. **Install dependencies:**
-   ```bash
    npm install
    ```
 
-3. **Configure Environment Variables:**
-   Create a `.env` file in the root directory (refer to `.env.example` if available):
-   ```env
-   VITE_AI_API_KEY=your_api_key_here
+2. **Rebuild the native SQLite module against Electron:**
+   ```bash
+   npx electron-rebuild -f -w better-sqlite3
    ```
 
-4. **Run in Development Mode:**
+3. **Configure your AI endpoint** — copy `.env.example` to `.env` and fill it in:
+   ```env
+   VITE_AI_BASE_URL=https://api.groq.com/openai/v1
+   VITE_AI_API_KEY=your_api_key_here
+   VITE_AI_MODEL=qwen/qwen3.6-27b
+   VITE_TRANSCRIBE_MODEL=whisper-large-v3-turbo
+   ```
+   Any OpenAI-compatible endpoint works — Groq, OpenAI, Together, or a local Ollama/LM Studio server.
+
+4. **Run:**
    ```bash
    npm run dev
    ```
 
 ---
 
+## 🏗️ How It Works
+
+Aura is split into three sandboxed layers that talk only through a tiny allowlisted IPC bridge:
+
+```
+┌─ Main process (Node) ──────────────────────────────────────┐
+│ frameless transparent window · tray · global hotkeys       │
+│ desktopCapturer · powerMonitor · better-sqlite3 + FTS5     │
+│ tesseract.js worker · content protection                   │
+└──────────────▲──────────────────────────┬──────────────────┘
+        ipcMain.handle          contextBridge
+        (invoke-only)      window.overlay.* API
+┌──────────────┴──────────────────────────▼──────────────────┐
+│ Preload (sandboxed bridge) ── src/preload/index.js         │
+└──────────────▲──────────────────────────┬──────────────────┘
+┌──────────────┴──────────────────────────▼──────────────────┐
+│ Renderer (React + Tailwind) ── src/renderer/               │
+│ chat UI · streaming SSE client · WebAudio mixer ·          │
+│ MediaRecorder chunking · markdown rendering                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **Streaming chat** — direct `fetch` to any OpenAI-compatible `/chat/completions` endpoint with incremental SSE parsing and on-the-fly `<think>`-block filtering for reasoning models.
+- **System audio** — granted through `setDisplayMediaRequestHandler` (`audio: 'loopback'`); mic and system streams are mixed into one `MediaStreamAudioDestinationNode` and recorded as self-contained 5-second `.webm` chunks.
+- **Memory loop** — screenshots are skipped when the screen hasn't changed, OCR runs on a single shared worker, capture pauses on lock-screen/suspend, and a retention cron deletes anything older than 7 days (rows + image files).
+
+### Project structure
+
+```
+src/
+├─ main/
+│  ├─ index.js            # window, tray, hotkeys, IPC, capture permissions
+│  └─ memoryService.js    # SQLite + FTS5, capture/OCR loop, retention, search
+├─ preload/
+│  └─ index.js            # contextBridge → window.overlay.*
+└─ renderer/
+   ├─ index.html          # strict CSP
+   └─ src/
+      ├─ App.jsx          # overlay UI, chat, badges, /recall
+      └─ services/
+         ├─ aiService.js  # streaming chat client (OpenAI-compatible)
+         └─ audioService.js # mic + loopback capture, chunking, Whisper
+```
+
+---
+
+## 🔒 Data & Privacy
+
+- **Stealth by default** — Aura excludes itself from all screen captures; it also never appears in its own memory frames.
+- **Local-first memory** — screenshots, OCR text, and the database live in `%APPDATA%/ai-overlay/` (`memory_frames/`, `photographic-memory.db`). A cron purges frames older than 7 days.
+- **The only network traffic** is your own configured AI endpoint (chat, vision, transcription). The API key lives in `.env`, which is gitignored and never bundled into commits.
+- **Memory is pausable** — tray → *Pause Photographic Memory* stops the capture loop instantly.
+
+---
+
 ## 🛠️ Built With
 
-- **[Electron](https://www.electronjs.org/)** – Cross-platform desktop app runtime
+- **[Electron](https://www.electronjs.org/)** – desktop runtime and OS integration
 - **[React 19](https://react.dev/)** – UI framework
-- **[Vite](https://vitejs.dev/)** + **[electron-vite](https://electron-vite.org/)** – Fast build tooling and HMR
-- **[Tailwind CSS](https://tailwindcss.com/)** – Utility-first CSS styling
-- **[React Markdown](https://github.com/remarkjs/react-markdown)** – Rich Markdown & GFM rendering
+- **[Vite](https://vitejs.dev/)** + **[electron-vite](https://electron-vite.org/)** – build tooling and HMR
+- **[Tailwind CSS v4](https://tailwindcss.com/)** – styling
+- **[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)** – local SQLite with FTS5 full-text search
+- **[tesseract.js](https://tesseract.projectnaptha.com/)** – OCR engine (WASM)
+- **[React Markdown](https://github.com/remarkjs/react-markdown)** – GFM rendering
 
 ---
 
