@@ -2,17 +2,17 @@
 
 > A stealthy, high-performance system-level AI assistant overlay built with Electron, React, Vite, and a photographic memory.
 
-Aura lives quietly in your system tray and slides into view whenever you need it with a simple global shortcut (`Ctrl+Shift+Space` / `Cmd+Shift+Space`). It answers questions with streaming markdown, sees your screen, hears your microphone *and* system audio, remembers everything it saw — and stays invisible to screen recordings while doing it.
+Aura lives quietly in your system tray and slides into view whenever you need it with a simple global shortcut (`Ctrl+Shift+Space` / `Cmd+Shift+Space`). It answers questions with streaming markdown, sees your screen, hears your microphone _and_ system audio, remembers everything it saw — and stays invisible to screen recordings while doing it.
 
 ---
 
 ## ✨ Features
 
 - ⚡ **Instant Summon & Dismiss** — Toggle the overlay from anywhere with `Ctrl+Shift+Space`. `Esc` or click-away hides it; it keeps running quietly in the tray.
-- 👻 **Stealth Mode** — `win.setContentProtection(true)` makes Aura invisible to OBS, Discord, Zoom, and Teams captures (`WDA_EXCLUDEFROMCAPTURE` on Windows). Toggle with `Ctrl+Alt+S` or the composer badge.
+- 👻 **Stealth Mode** — `win.setContentProtection(true)` makes Aura invisible to OBS, Discord, Zoom, and Teams captures (`WDA_EXCLUDEFROMCAPTURE` on Windows). Toggle with `Ctrl+Shift+U` / `Cmd+Shift+U` or the composer badge.
 - 📸 **Vision Context** — One click grabs your screen as context for vision-capable models. Clipboard image paste works too (screenshot from anywhere → `Ctrl+V`).
-- 🎙️ **Dual-Channel Audio Loopback** — Captures your microphone *and* system output simultaneously, mixes them via the Web Audio API, and transcribes 5-second chunks through Whisper. Transcripts land straight in the input box.
-- 🧠 **Photographic Memory** — A background loop screenshots your screen every 15 seconds, OCRs it with tesseract.js, and stores it in a local SQLite database with full-text search (FTS5). Nothing leaves your machine.
+- 🎙️ **Dual-Channel Audio Loopback** — Captures your microphone _and_ system output simultaneously, mixes them via the Web Audio API, and transcribes 5-second chunks through Whisper. Transcripts land straight in the input box; listening stops when the overlay is hidden.
+- 🧠 **Photographic Memory** — An opt-in background loop can screenshot your primary display every 15 seconds, OCR it with tesseract.js, and store it in a local SQLite database with full-text search (FTS5). Nothing leaves your machine.
 - 🔎 **`/recall` — RAG on your own screen history** — Type `/recall github` and Aura searches its memory index, attaches the matches as context, and the AI summarizes what you were doing.
 - 🎨 **Sleek Glassmorphic Design** — Frameless translucent window, drag-to-move, edge-resizable, auto-growing height, GFM markdown rendering, streaming caret.
 
@@ -20,14 +20,14 @@ Aura lives quietly in your system tray and slides into view whenever you need it
 
 ## ⌨️ Shortcuts & Commands
 
-| Input | Description |
-| :--- | :--- |
-| `Ctrl+Shift+Space` / `Cmd+Shift+Space` | Toggle Aura from anywhere in the OS |
-| `Ctrl+Alt+S` | Toggle **Stealth Mode** (capture exclusion) |
-| `/recall <keyword>` | Search screen history and let the AI summarize it |
-| `Enter` | Send message |
-| `Shift+Enter` | Newline in composer |
-| `Esc` | Hide overlay |
+| Input                                  | Description                                       |
+| :------------------------------------- | :------------------------------------------------ |
+| `Ctrl+Shift+Space` / `Cmd+Shift+Space` | Toggle Aura from anywhere in the OS               |
+| `Ctrl+Shift+U` / `Cmd+Shift+U`          | Toggle **Stealth Mode** (capture exclusion)       |
+| `/recall <keyword>`                    | Search screen history and let the AI summarize it |
+| `Enter`                                | Send message                                      |
+| `Shift+Enter`                          | Newline in composer                               |
+| `Esc`                                  | Hide overlay                                      |
 
 Composer badges: **Listen** (mic + system audio) · **Screen** (vision context) · **Stealth/Shared** (capture visibility).
 
@@ -43,6 +43,7 @@ Composer badges: **Listen** (mic + system audio) · **Screen** (vision context) 
 ### Installation
 
 1. **Clone and install:**
+
    ```bash
    git clone https://github.com/Vishalvishnu64/Aura.git
    cd Aura
@@ -50,18 +51,21 @@ Composer badges: **Listen** (mic + system audio) · **Screen** (vision context) 
    ```
 
 2. **Rebuild the native SQLite module against Electron:**
+
    ```bash
    npx electron-rebuild -f -w better-sqlite3
    ```
 
 3. **Configure your AI endpoint** — copy `.env.example` to `.env` and fill it in:
+
    ```env
    VITE_AI_BASE_URL=https://api.groq.com/openai/v1
    VITE_AI_API_KEY=your_api_key_here
-   VITE_AI_MODEL=qwen/qwen3.6-27b
+   VITE_AI_MODEL=qwen/qwen3.8-27b
    VITE_TRANSCRIBE_MODEL=whisper-large-v3-turbo
    ```
-   Any OpenAI-compatible endpoint works — Groq, OpenAI, Together, or a local Ollama/LM Studio server.
+
+   Any OpenAI-compatible endpoint works — Groq, OpenAI, Together, or a local Ollama/LM Studio server. These settings are loaded by Electron's main process at runtime; the API key is never bundled into the renderer. `AI_*` names are also accepted for deployments that do not use the `VITE_` prefix. Packaged deployments can set `AI_OVERLAY_ENV_FILE` to an environment-file path.
 
 4. **Run:**
    ```bash
@@ -78,7 +82,7 @@ Aura is split into three sandboxed layers that talk only through a tiny allowlis
 ┌─ Main process (Node) ──────────────────────────────────────┐
 │ frameless transparent window · tray · global hotkeys       │
 │ desktopCapturer · powerMonitor · better-sqlite3 + FTS5     │
-│ tesseract.js worker · content protection                   │
+│ tesseract.js worker · content protection · AI fetch/SSE    │
 └──────────────▲──────────────────────────┬──────────────────┘
         ipcMain.handle          contextBridge
         (invoke-only)      window.overlay.* API
@@ -87,12 +91,12 @@ Aura is split into three sandboxed layers that talk only through a tiny allowlis
 └──────────────▲──────────────────────────┬──────────────────┘
 ┌──────────────┴──────────────────────────▼──────────────────┐
 │ Renderer (React + Tailwind) ── src/renderer/               │
-│ chat UI · streaming SSE client · WebAudio mixer ·          │
+│ chat UI · streamed IPC chunks · WebAudio mixer ·           │
 │ MediaRecorder chunking · markdown rendering                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- **Streaming chat** — direct `fetch` to any OpenAI-compatible `/chat/completions` endpoint with incremental SSE parsing and on-the-fly `<think>`-block filtering for reasoning models.
+- **Streaming chat** — the Electron main process sends requests to any OpenAI-compatible `/chat/completions` endpoint with incremental SSE parsing; the renderer receives only streamed text and never receives the API key.
 - **System audio** — granted through `setDisplayMediaRequestHandler` (`audio: 'loopback'`); mic and system streams are mixed into one `MediaStreamAudioDestinationNode` and recorded as self-contained 5-second `.webm` chunks.
 - **Memory loop** — screenshots are skipped when the screen hasn't changed, OCR runs on a single shared worker, capture pauses on lock-screen/suspend, and a retention cron deletes anything older than 7 days (rows + image files).
 
@@ -119,9 +123,9 @@ src/
 ## 🔒 Data & Privacy
 
 - **Stealth by default** — Aura excludes itself from all screen captures; it also never appears in its own memory frames.
-- **Local-first memory** — screenshots, OCR text, and the database live in `%APPDATA%/ai-overlay/` (`memory_frames/`, `photographic-memory.db`). A cron purges frames older than 7 days.
-- **The only network traffic** is your own configured AI endpoint (chat, vision, transcription). The API key lives in `.env`, which is gitignored and never bundled into commits.
-- **Memory is pausable** — tray → *Pause Photographic Memory* stops the capture loop instantly.
+- **Local-first memory** — screenshots, OCR text, and the database live in `%APPDATA%/ai-overlay/` (`memory_frames/`, `photographic-memory.db`). Memory is opt-in, can be paused or deleted from the overlay/tray, and a cron purges frames older than 7 days.
+- **The only network traffic** is your own configured AI endpoint (chat, vision, transcription). The API key is read by the Electron main process from `.env` or environment variables and is not bundled into the renderer.
+- **Memory is pausable** — tray → _Pause Photographic Memory_ stops the capture loop instantly.
 
 ---
 

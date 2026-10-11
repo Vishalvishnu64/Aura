@@ -1,15 +1,11 @@
 /**
- * Minimal streaming client for any OpenAI-compatible chat API
- * (Groq, OpenAI, Together, LM Studio, Ollama with OLLAMA_ORIGINS=*, ...).
+ * Renderer-side contract for the main-process streaming chat bridge.
  *
- * Configuration lives in `.env` (Vite exposes VITE_* vars to the renderer):
- *   VITE_AI_BASE_URL  e.g. https://api.groq.com/openai/v1
- *   VITE_AI_API_KEY   your secret key (stays out of git via .gitignore)
- *   VITE_AI_MODEL     e.g. meta-llama/llama-4-scout-17b-16e-instruct
+ * The renderer deliberately contains no endpoint or API-key configuration.
+ * `window.overlay.startChat()` sends the request through the allowlisted
+ * preload bridge; the main process owns environment loading, fetch, SSE
+ * parsing, and the secret API key.
  */
-const BASE_URL = import.meta.env.VITE_AI_BASE_URL ?? 'https://api.groq.com/openai/v1'
-const API_KEY = import.meta.env.VITE_AI_API_KEY ?? ''
-const MODEL = import.meta.env.VITE_AI_MODEL ?? 'qwen/qwen3.6-27b'
 
 /**
  * Many open models (Qwen3, DeepSeek-R1, ...) inline their chain-of-thought
@@ -74,31 +70,6 @@ function createThinkFilter(onChunk) {
 }
 
 /**
- * Shape the message list for the API. When a screenshot is attached, the
- * newest user message is upgraded to the multimodal content format:
- * [{ type: 'text' }, { type: 'image_url' }].
- *
- * @param {{role: string, content: string}[]} messages
- * @param {string | null} imageBase64 PNG data URL from captureScreen()
- */
-function buildMessages(messages, imageBase64) {
-  if (!imageBase64) return messages.map(({ role, content }) => ({ role, content }))
-
-  return messages.map((message, index) => {
-    const isLastUser = index === messages.length - 1 && message.role === 'user'
-    if (!isLastUser) return { role: message.role, content: message.content }
-
-    return {
-      role: 'user',
-      content: [
-        { type: 'text', text: message.content },
-        { type: 'image_url', image_url: { url: imageBase64 } }
-      ]
-    }
-  })
-}
-
-/**
  * Stream a chat completion, invoking `onChunk` for every text delta.
  *
  * @param {object} options
@@ -109,67 +80,45 @@ function buildMessages(messages, imageBase64) {
  * @returns {Promise<void>} Resolves when the stream finishes ([DONE] or EOF).
  */
 export async function streamChat({ messages, imageBase64 = null, signal, onChunk }) {
-  if (!API_KEY && /api\.(groq|openai)\.com/.test(BASE_URL)) {
-    throw new Error('Missing VITE_AI_API_KEY - add it to .env and restart the dev server')
+  const bridge = window.overlay
+  if (!bridge?.startChat || !bridge?.onChatChunk) {
+    throw new Error('AI bridge unavailable - restart the application')
   }
 
-  const response = await fetch(`${BASE_URL}/chat/completions`, {
-    method: 'POST',
-    signal,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${API_KEY}`
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      stream: true,
-      messages: buildMessages(messages, imageBase64)
-    })
-  })
-
-  if (!response.ok) {
-    let detail = ''
-    try {
-      detail = (await response.text()).slice(0, 300)
-    } catch {
-      /* body unreadable - fall through with status only */
-    }
-    throw new Error(`AI request failed (${response.status}): ${detail}`)
-  }
-  if (!response.body) throw new Error('AI response has no readable body')
-
-  // --- Incremental Server-Sent-Events parsing ---
-  // Network chunks can split SSE lines mid-way, so bytes are accumulated in a
-  // buffer and only complete lines are consumed.
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
+  const requestId = typeof crypto?.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `chat-${Date.now()}-${Math.random().toString(36).slice(2)}`
   const filter = createThinkFilter(onChunk)
-  let buffer = ''
+  const removeChunkListener = bridge.onChatChunk(requestId, (delta) => filter.push(delta))
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-
-    let newlineIndex
-    while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, newlineIndex).trimEnd()
-      buffer = buffer.slice(newlineIndex + 1)
-
-      if (!line.startsWith('data:')) continue // skip comments / keep-alives
-      const payload = line.slice(5).trim()
-      if (payload === '[DONE]') {
-        filter.flush()
-        return
-      }
-
-      try {
-        const delta = JSON.parse(payload)?.choices?.[0]?.delta?.content
-        if (delta) filter.push(delta)
-      } catch {
-        /* ignore non-JSON lines (pings etc.) */
-      }
-    }
+  const abort = () => {
+    // Cancellation is best-effort: the main process owns the actual network
+    // AbortController and will stop emitting chunks as soon as it receives it.
+    const pending = bridge.cancelChat?.(requestId)
+    if (pending?.catch) void pending.catch(() => {})
   }
-  filter.flush()
+
+  if (signal?.aborted) {
+    removeChunkListener?.()
+    throw createAbortError()
+  }
+  signal?.addEventListener('abort', abort, { once: true })
+
+  try {
+    await bridge.startChat({ requestId, messages, imageBase64 })
+    if (signal?.aborted) throw createAbortError()
+    filter.flush()
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError') throw createAbortError()
+    throw error
+  } finally {
+    signal?.removeEventListener('abort', abort)
+    removeChunkListener?.()
+  }
+}
+
+function createAbortError() {
+  const error = new Error('The operation was aborted')
+  error.name = 'AbortError'
+  return error
 }

@@ -8,7 +8,7 @@ import { createWorker } from 'tesseract.js'
 /**
  * Photographic Memory Loop
  *
- * Captures the primary screen every INTERVAL_MS, saves a compressed JPEG to
+ * When enabled, captures the primary screen every INTERVAL_MS, saves a compressed JPEG to
  * userData/memory_frames, extracts its text with a shared tesseract.js
  * worker, and stores everything in a better-sqlite3 database with an FTS5
  * full-text index for instant searching.
@@ -38,6 +38,9 @@ let isProcessing = false
 let lastChangeHash = null // Buffer of the tiny bitmap from the previous frame
 let userPaused = false // tray toggle
 let systemPaused = false // lock-screen / suspend
+let captureGeneration = 0 // invalidates an in-flight OCR job after clear-history
+let lastCaptureAt = null
+let memoryConsent = false
 
 let framesDir = null
 let tessdataDir = null
@@ -45,13 +48,22 @@ let stmtInsert = null
 let stmtCleanupSelect = null
 let stmtCleanupDelete = null
 let stmtSearch = null
+let stmtMetaGet = null
+let stmtMetaSet = null
+let stmtCount = null
+let stmtFramePaths = null
+let stmtDeleteAll = null
+
+const statusListeners = new Set()
 
 const powerListeners = {
   pause: () => {
     systemPaused = true
+    notifyStatus()
   },
   resume: () => {
     systemPaused = false
+    notifyStatus()
   }
 }
 
@@ -64,6 +76,10 @@ const SCHEMA_SQL = `
     ocr_text TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_memory_frames_timestamp ON memory_frames(timestamp);
+  CREATE TABLE IF NOT EXISTS memory_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
   CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     ocr_text, content='memory_frames', content_rowid='id'
   );
@@ -79,6 +95,8 @@ const SCHEMA_SQL = `
 // Init / teardown
 // ---------------------------------------------------------------------------
 export function initMemoryService() {
+  if (db) return getMemoryStatus()
+
   const userData = app.getPath('userData')
   framesDir = path.join(userData, 'memory_frames')
   tessdataDir = path.join(userData, 'tessdata')
@@ -105,6 +123,20 @@ export function initMemoryService() {
     ORDER BY f.timestamp DESC
     LIMIT ${SEARCH_LIMIT}
   `)
+  stmtMetaGet = db.prepare('SELECT value FROM memory_meta WHERE key = ?')
+  stmtMetaSet = db.prepare(
+    'INSERT INTO memory_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  )
+  stmtCount = db.prepare('SELECT COUNT(*) AS count FROM memory_frames')
+  stmtFramePaths = db.prepare('SELECT image_path FROM memory_frames')
+  stmtDeleteAll = db.prepare('DELETE FROM memory_frames')
+
+  // New installs are opt-in: screen memory stays paused until the user turns
+  // it on from the overlay or tray. Existing users retain their prior choice.
+  const hasConsent = readMeta('memory_consent') === '1'
+  memoryConsent = hasConsent
+  userPaused = hasConsent ? readMeta('user_paused') === '1' : true
+  lastCaptureAt = readMeta('last_capture_at') || null
 
   cleanupOldFrames()
   cleanupTimer = setInterval(cleanupOldFrames, CLEANUP_INTERVAL_MS)
@@ -120,6 +152,8 @@ export function initMemoryService() {
   }, INTERVAL_MS)
 
   console.log(`[memory] photographic memory loop started (every ${INTERVAL_MS / 1000}s)`)
+  notifyStatus()
+  return getMemoryStatus()
 }
 
 export function stopMemoryService() {
@@ -136,13 +170,24 @@ export function stopMemoryService() {
   worker = null
   if (db) db.close()
   db = null
+  memoryConsent = false
+  stmtMetaGet = null
+  stmtMetaSet = null
+  stmtCount = null
+  stmtFramePaths = null
+  stmtDeleteAll = null
   return Promise.all(jobs)
 }
 
 /** Tray toggle: pause/resume capture while keeping the DB intact. */
 export function setMemoryPaused(paused) {
   userPaused = Boolean(paused)
+  if (stmtMetaSet) {
+    stmtMetaSet.run('memory_consent', '1')
+    stmtMetaSet.run('user_paused', userPaused ? '1' : '0')
+  }
   console.log(`[memory] ${userPaused ? 'paused' : 'resumed'} by user`)
+  notifyStatus()
   return userPaused
 }
 
@@ -150,12 +195,96 @@ export function isMemoryPaused() {
   return userPaused
 }
 
+/**
+ * Return a renderer-safe snapshot. Paths, OCR text, and database handles never
+ * cross the IPC boundary; only operational state and the capture policy do.
+ */
+export function getMemoryStatus() {
+  let frameCount = 0
+  if (stmtCount) {
+    try {
+      frameCount = Number(stmtCount.get()?.count ?? 0)
+    } catch {
+      frameCount = 0
+    }
+  }
+
+  let display = null
+  try {
+    const primary = screen.getPrimaryDisplay()
+    display = describeDisplay(primary)
+  } catch {
+    /* Electron's screen module may not be ready during early startup. */
+  }
+
+  return {
+    available: Boolean(db),
+    paused: userPaused,
+    consented: memoryConsent,
+    userPaused,
+    systemPaused,
+    active: Boolean(db && !userPaused && !systemPaused),
+    frameCount,
+    lastCaptureAt,
+    intervalMs: INTERVAL_MS,
+    retentionDays: RETENTION_DAYS,
+    capture: {
+      policy: 'primary-display',
+      display
+    }
+  }
+}
+
+/** Subscribe to safe status changes; returns an unsubscribe function. */
+export function onMemoryStatus(callback) {
+  if (typeof callback !== 'function') return () => {}
+  statusListeners.add(callback)
+  return () => statusListeners.delete(callback)
+}
+
+/**
+ * Delete all photographic-memory rows and their local frame files. The
+ * generation counter prevents an OCR job that was already in flight from
+ * repopulating history after the user cleared it.
+ */
+export async function clearMemory() {
+  if (!db || !stmtFramePaths || !stmtDeleteAll) return { deleted: 0 }
+
+  captureGeneration += 1
+  lastChangeHash = null
+  const rows = stmtFramePaths.all()
+  const info = stmtDeleteAll.run()
+  lastCaptureAt = null
+  if (stmtMetaSet) stmtMetaSet.run('last_capture_at', '')
+
+  const files = new Set(rows.map((row) => row.image_path).filter(Boolean))
+  // Also remove orphaned frame files left by a terminated OCR job or a prior
+  // interrupted cleanup, but only files with our own frame naming convention.
+  if (framesDir) {
+    try {
+      const names = await fsp.readdir(framesDir)
+      for (const name of names) {
+        if (/^frame-\d+\.jpg$/i.test(name)) files.add(path.join(framesDir, name))
+      }
+    } catch {
+      /* The directory may be unavailable during shutdown. */
+    }
+  }
+  await Promise.all([...files].map((filePath) => fsp.unlink(filePath).catch(() => {})))
+  notifyStatus()
+  return { deleted: Number(info.changes ?? rows.length) }
+}
+
+// Explicit alias for callers that describe the action as clearing history.
+export const clearMemoryHistory = clearMemory
+
 // ---------------------------------------------------------------------------
 // Capture + OCR loop
 // ---------------------------------------------------------------------------
 async function captureTick() {
   if (userPaused || systemPaused || isProcessing || !db) return
   isProcessing = true
+  const generationAtStart = captureGeneration
   try {
     const display = screen.getPrimaryDisplay()
     const scale = FRAME_WIDTH / display.size.width
@@ -194,7 +323,15 @@ async function captureTick() {
       return
     }
 
+    if (generationAtStart !== captureGeneration || !db) {
+      await fsp.unlink(filePath).catch(() => {})
+      return
+    }
+
     stmtInsert.run(filePath, text)
+    lastCaptureAt = new Date().toISOString()
+    if (stmtMetaSet) stmtMetaSet.run('last_capture_at', lastCaptureAt)
+    notifyStatus()
   } finally {
     isProcessing = false
   }
@@ -215,6 +352,7 @@ function cleanupOldFrames() {
     const info = stmtCleanupDelete.run(cutoff, offset)
     if (info.changes > 0) {
       console.log(`[memory] retention cleanup removed ${info.changes} frames (>${RETENTION_DAYS}d)`)
+      notifyStatus()
     }
   } catch (err) {
     console.warn('[memory] cleanup failed:', err.message)
@@ -239,5 +377,43 @@ export function searchMemory(keyword) {
   } catch (err) {
     console.warn('[memory] search failed:', err.message)
     return []
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+function readMeta(key) {
+  if (!stmtMetaGet) return ''
+  try {
+    return String(stmtMetaGet.get(key)?.value ?? '')
+  } catch {
+    return ''
+  }
+}
+
+function describeDisplay(display) {
+  if (!display) return null
+  return {
+    id: String(display.id),
+    name: String(display.label || `Display ${display.id}`),
+    bounds: {
+      x: Number(display.bounds?.x ?? 0),
+      y: Number(display.bounds?.y ?? 0),
+      width: Number(display.bounds?.width ?? 0),
+      height: Number(display.bounds?.height ?? 0)
+    },
+    scaleFactor: Number(display.scaleFactor || 1)
+  }
+}
+
+function notifyStatus() {
+  const status = getMemoryStatus()
+  for (const listener of statusListeners) {
+    try {
+      listener(status)
+    } catch {
+      /* A renderer/status observer must never stop the capture loop. */
+    }
   }
 }

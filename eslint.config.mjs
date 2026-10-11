@@ -17,6 +17,15 @@ export default [
     }
   },
   {
+    // Standalone MCP server runs under plain system Node
+    files: ['mcp/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: globals.node
+    }
+  },
+  {
     // Renderer runs in the Chromium sandbox
     files: ['src/renderer/**/*.{js,jsx}'],
     languageOptions: {

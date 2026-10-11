@@ -19,9 +19,6 @@
  * API-ready file. Cost: a few milliseconds of audio at chunk boundaries.
  */
 const CHUNK_MS = 5000
-const BASE_URL = import.meta.env.VITE_AI_BASE_URL ?? 'https://api.groq.com/openai/v1'
-const API_KEY = import.meta.env.VITE_AI_API_KEY ?? ''
-const TRANSCRIBE_MODEL = import.meta.env.VITE_TRANSCRIBE_MODEL ?? 'whisper-large-v3-turbo'
 
 /**
  * Transcribe one audio chunk. Wired to any OpenAI-compatible
@@ -34,30 +31,21 @@ const TRANSCRIBE_MODEL = import.meta.env.VITE_TRANSCRIBE_MODEL ?? 'whisper-large
  */
 export async function sendToTranscription(blob) {
   if (!blob || blob.size === 0) return ''
-
-  const form = new FormData()
-  form.append('file', blob, 'chunk.webm')
-  form.append('model', TRANSCRIBE_MODEL)
-  form.append('response_format', 'json')
-
-  const response = await fetch(`${BASE_URL}/audio/transcriptions`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${API_KEY}` },
-    body: form
-  })
-
-  if (!response.ok) {
-    let detail = ''
-    try {
-      detail = (await response.text()).slice(0, 200)
-    } catch {
-      /* body unreadable */
-    }
-    throw new Error(`Transcription failed (${response.status}): ${detail}`)
+  if (!window.overlay?.sendToTranscription) {
+    throw new Error('Transcription bridge unavailable - restart the application')
   }
 
-  const data = await response.json()
-  return (data.text ?? '').trim()
+  // ArrayBuffer is structured-cloneable across the preload bridge. The API
+  // key and multipart request are assembled only in the main process.
+  return window.overlay.sendToTranscription({
+    data: await blob.arrayBuffer(),
+    type: blob.type || 'audio/webm'
+  })
+}
+
+function reportAudioStatus(status) {
+  const pending = window.overlay?.reportAudioStatus?.(status)
+  if (pending?.catch) void pending.catch(() => {})
 }
 
 /**
@@ -104,12 +92,14 @@ export async function startAudioLoopback({ onReady, onTranscript, onError, onEnd
   let audioContext = null
   let recorder = null
   const streams = []
+  reportAudioStatus({ state: 'starting' })
 
   // ------------------------- 1. Microphone -------------------------------
   let micStream
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
   } catch (err) {
+    reportAudioStatus({ state: 'error', error: `Microphone unavailable: ${err.message}` })
     throw new Error(`Microphone unavailable: ${err.message}`, { cause: err })
   }
   streams.push(micStream)
@@ -146,6 +136,7 @@ export async function startAudioLoopback({ onReady, onTranscript, onError, onEnd
       if (text) onTranscript?.(text)
     } catch (err) {
       onError?.(err.message) // keep recording; only this chunk is lost
+      reportAudioStatus({ state: 'error', channels: systemStream ? 'mic+system' : 'mic', error: err.message })
     }
   }
 
@@ -167,6 +158,7 @@ export async function startAudioLoopback({ onReady, onTranscript, onError, onEnd
 
   recorder.start()
   const channels = systemStream ? 'mic+system' : 'mic'
+  reportAudioStatus({ state: 'active', channels })
   onReady?.(channels)
 
   function stop(reason = null) {
@@ -179,6 +171,7 @@ export async function startAudioLoopback({ onReady, onTranscript, onError, onEnd
     streams.forEach((stream) => stream.getTracks().forEach((t) => t.stop()))
     audioContext?.close().catch(() => {})
     if (reason) onEnded?.(reason)
+    reportAudioStatus({ state: reason ? 'ended' : 'idle', error: reason })
   }
 
   return { stop: () => stop(null) }

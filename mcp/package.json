@@ -1,0 +1,13 @@
+{
+  "name": "aura-memory-mcp",
+  "version": "1.0.0",
+  "description": "MCP server exposing Aura's photographic screen-memory index (read-only SQLite FTS5)",
+  "type": "module",
+  "main": "server.js",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "better-sqlite3": "^13.0.3",
+    "zod": "^4.4.3"
+  }
+}
