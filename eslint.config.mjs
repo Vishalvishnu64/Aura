@@ -26,6 +26,16 @@ export default [
     }
   },
   {
+    // Node's built-in integration checks use CommonJS intentionally so they
+    // can load the Electron-facing source with a small boundary shim.
+    files: ['tests/**/*.cjs'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'commonjs',
+      globals: globals.node
+    }
+  },
+  {
     // Renderer runs in the Chromium sandbox
     files: ['src/renderer/**/*.{js,jsx}'],
     languageOptions: {

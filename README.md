@@ -15,6 +15,7 @@ Aura lives quietly in your system tray and slides into view whenever you need it
 - 🧠 **Photographic Memory** — An opt-in background loop can screenshot your primary display every 15 seconds, OCR it with tesseract.js, and store it in a local SQLite database with full-text search (FTS5). Nothing leaves your machine.
 - 🔎 **`/recall` — RAG on your own screen history** — Type `/recall github` and Aura searches its memory index, attaches the matches as context, and the AI summarizes what you were doing.
 - 🎨 **Sleek Glassmorphic Design** — Frameless translucent window, drag-to-move, edge-resizable, auto-growing height, GFM markdown rendering, streaming caret.
+- 🗂️ **Personal Command Center** — Ask, search authorized local folders, and manage a persistent offline task list from the same overlay. Use `/find <name>` and `/todo <task>` for quick actions.
 
 ---
 
@@ -25,11 +26,15 @@ Aura lives quietly in your system tray and slides into view whenever you need it
 | `Ctrl+Shift+Space` / `Cmd+Shift+Space` | Toggle Aura from anywhere in the OS               |
 | `Ctrl+Shift+U` / `Cmd+Shift+U`          | Toggle **Stealth Mode** (capture exclusion)       |
 | `/recall <keyword>`                    | Search screen history and let the AI summarize it |
+| `/find <name>`                         | Search authorized local folders                   |
+| `/todo <task>`                         | Add a local task                                   |
 | `Enter`                                | Send message                                      |
 | `Shift+Enter`                          | Newline in composer                               |
 | `Esc`                                  | Hide overlay                                      |
 
 Composer badges: **Listen** (mic + system audio) · **Screen** (vision context) · **Stealth/Shared** (capture visibility).
+
+The **Files** tab searches only folders you explicitly authorize and supports Open, Show in folder, and Copy path. The **Tasks** tab stores a checklist locally on this device and works without an AI connection.
 
 ---
 
@@ -106,16 +111,22 @@ Aura is split into three sandboxed layers that talk only through a tiny allowlis
 src/
 ├─ main/
 │  ├─ index.js            # window, tray, hotkeys, IPC, capture permissions
+│  ├─ fileService.js       # authorized local-folder search and safe file actions
+│  ├─ tasksService.js      # local checklist storage and mutations
 │  └─ memoryService.js    # SQLite + FTS5, capture/OCR loop, retention, search
 ├─ preload/
 │  └─ index.js            # contextBridge → window.overlay.*
 └─ renderer/
    ├─ index.html          # strict CSP
    └─ src/
-      ├─ App.jsx          # overlay UI, chat, badges, /recall
+      ├─ App.jsx            # Ask/Files/Tasks tabs, chat, badges, slash commands
+      ├─ components/
+      │  ├─ FilesPanel.jsx  # authorized local file search UI
+      │  └─ TasksPanel.jsx  # persistent local checklist UI
       └─ services/
-         ├─ aiService.js  # streaming chat client (OpenAI-compatible)
-         └─ audioService.js # mic + loopback capture, chunking, Whisper
+         ├─ aiService.js    # streaming chat client (OpenAI-compatible)
+         ├─ audioService.js # mic + loopback capture, chunking, Whisper
+         └─ localCommands.js # deterministic /find and /todo routing
 ```
 
 ---
@@ -126,6 +137,8 @@ src/
 - **Local-first memory** — screenshots, OCR text, and the database live in `%APPDATA%/ai-overlay/` (`memory_frames/`, `photographic-memory.db`). Memory is opt-in, can be paused or deleted from the overlay/tray, and a cron purges frames older than 7 days.
 - **The only network traffic** is your own configured AI endpoint (chat, vision, transcription). The API key is read by the Electron main process from `.env` or environment variables and is not bundled into the renderer.
 - **Memory is pausable** — tray → _Pause Photographic Memory_ stops the capture loop instantly.
+- **File search is scoped** — Aura searches only folders you explicitly authorize; it does not search file contents, delete files, or send paths to the AI.
+- **Tasks are local** — the checklist is stored separately in `tasks.db` and works without an AI connection.
 
 ---
 

@@ -6,6 +6,9 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { streamChat } from './services/aiService'
 import { startAudioLoopback } from './services/audioService'
+import FilesPanel from './components/FilesPanel'
+import TasksPanel from './components/TasksPanel'
+import { executeLocalCommand } from './services/localCommands'
 
 gsap.registerPlugin(useGSAP, ScrollTrigger)
 
@@ -122,7 +125,9 @@ function buildRecallPrompt(results, keyword) {
 const SLASH_COMMANDS = [
   { command: '/recall', fill: '/recall ', label: '/recall <keyword>', desc: 'Search screen memory', exactSubmit: false },
   { command: '/code', fill: '/code', label: '/code', desc: 'Review visible code', exactSubmit: true },
-  { command: '/explain', fill: '/explain', label: '/explain', desc: 'Summarize screen', exactSubmit: true }
+  { command: '/explain', fill: '/explain', label: '/explain', desc: 'Summarize screen', exactSubmit: true },
+  { command: '/find', fill: '/find ', label: '/find <name>', desc: 'Find a local file', exactSubmit: false },
+  { command: '/todo', fill: '/todo ', label: '/todo <task>', desc: 'Add a local task', exactSubmit: false }
 ]
 
 function getSlashCommands(value) {
@@ -165,6 +170,16 @@ export default function App() {
   const [appStatus, setAppStatus] = useState(null)
   const [memoryBusy, setMemoryBusy] = useState(false)
   const [notice, setNotice] = useState(null)
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem('aura.activeTab')
+      return ['ask', 'files', 'tasks'].includes(saved) ? saved : 'ask'
+    } catch {
+      return 'ask'
+    }
+  })
+  const [fileSearchRequest, setFileSearchRequest] = useState(null)
+  const [createdTask, setCreatedTask] = useState(null)
 
   const cardRef = useRef(null) // outer chat card; used to measure the complete layout
   const cardPanelRef = useRef(null) // visible glass panel - stealth animation target
@@ -176,6 +191,7 @@ export default function App() {
   const abortRef = useRef(null)
   const audioRef = useRef(null) // audio loopback controller ({stop})
   const audioActionRef = useRef(false)
+  const audioGenerationRef = useRef(0)
   const stealthActionRef = useRef(false)
   const submitInFlightRef = useRef(false)
   const rafRef = useRef(0)
@@ -185,11 +201,21 @@ export default function App() {
   const lastManualResizeAt = useRef(0)
   const animatedCountRef = useRef(0) // [data-message] nodes already revealed by GSAP
   const reducedMotionRef = useRef(false)
+  const lastResizeRef = useRef(0)
+  const growLimitRef = useRef(Infinity)
 
   const hasConversation = messages.length > 0
   const slashCommands = getSlashCommands(input)
   const activeSlashIndex = Math.min(slashIndex, Math.max(0, slashCommands.length - 1))
   const memoryStatus = appStatus?.memory ?? null
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('aura.activeTab', activeTab)
+    } catch {
+      // Local tab preference is optional; the app remains usable if storage is unavailable.
+    }
+  }, [activeTab])
 
   /* Auto-grow: when the complete card no longer fits, ask Electron to enlarge
      the window (height only, width is the user's). Never shrinks - once the
@@ -198,20 +224,16 @@ export default function App() {
     const card = cardRef.current
     const panel = cardPanelRef.current
     const content = contentRef.current
-    const list = listRef.current
-    const menu = slashMenuRef.current
-    if (!card || !panel || !content || !window.overlay?.resizeWindow) return
+    const activePanel = content?.querySelector('[role="tabpanel"]:not([hidden])')
+    const list = activeTab === 'ask' ? listRef.current : null
+    const menu = activeTab === 'ask' ? slashMenuRef.current : null
+    if (!card || !panel || !content || !activePanel || !window.overlay?.resizeWindow) return
     if (Date.now() - lastManualResizeAt.current < 800) return // user is dragging
     cancelAnimationFrame(rafRef.current)
     rafRef.current = requestAnimationFrame(() => {
-      const panelHeight = panel.getBoundingClientRect().height
-      const outerPadding = Math.max(0, card.offsetHeight - panel.offsetHeight)
       const listOverflow = list ? Math.max(0, list.scrollHeight - list.clientHeight) : 0
-      const contentHeight = Math.max(content.scrollHeight, content.clientHeight)
-
-      // A list owns its scrollbar, so its overflowing messages are not part of
-      // the parent scrollHeight. Add that delta to the complete card measure.
-      let desired = Math.max(panel.scrollHeight, panelHeight, contentHeight + listOverflow)
+      const chrome = card.offsetHeight - activePanel.clientHeight
+      let desired = chrome + Math.max(activePanel.scrollHeight, activePanel.clientHeight) + listOverflow
 
       // The command menu is positioned above the composer and therefore does
       // not contribute to scrollHeight. Grow only when the panel would clip it.
@@ -221,13 +243,16 @@ export default function App() {
         desired += Math.max(0, Math.ceil(panelTop + 4 - menuTop))
       }
 
-      desired = Math.ceil(desired + outerPadding)
-      if (desired > window.innerHeight + 1) {
+      desired = Math.min(Math.ceil(desired), growLimitRef.current)
+      if (desired > window.innerHeight + 2 && desired !== lastResizeRef.current) {
+        lastResizeRef.current = desired
         programmaticUntil.current = Date.now() + 500
-        window.overlay.resizeWindow(desired)
+        window.overlay.resizeWindow(desired).then((bounds) => {
+          if (bounds?.maxHeight) growLimitRef.current = bounds.maxHeight
+        }).catch(() => { lastResizeRef.current = 0 })
       }
     })
-  }, [])
+  }, [activeTab])
 
   /* Classify window resize events: anything not caused by our own
      resizeWindow call is treated as a manual user drag. */
@@ -235,6 +260,8 @@ export default function App() {
     const onResize = () => {
       if (Date.now() < programmaticUntil.current) return
       lastManualResizeAt.current = Date.now()
+      lastResizeRef.current = 0
+      growLimitRef.current = Infinity
     }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
@@ -257,13 +284,15 @@ export default function App() {
       cancelAnimationFrame(rafRef.current)
       observer.disconnect()
     }
-  }, [hasConversation, showSlashMenu, error, screenContext, autoGrow])
+  }, [hasConversation, showSlashMenu, error, screenContext, activeTab, autoGrow])
 
   /* Focus the input every time the overlay is summoned via hotkey/tray. */
   useEffect(() => {
+    if (activeTab !== 'ask') return undefined
+    inputRef.current?.focus()
     const unsubscribe = window.overlay?.onShown?.(() => inputRef.current?.focus())
     return unsubscribe
-  }, [])
+  }, [activeTab])
 
   /* Keep privacy, memory, shortcut, and display status visible and current. */
   useEffect(() => {
@@ -300,6 +329,7 @@ export default function App() {
      microphone/system recording explicit and prevents hidden capture. */
   useEffect(() => {
     const stopOnHide = () => {
+      audioGenerationRef.current += 1
       audioRef.current?.stop()
       audioRef.current = null
       setListening(false)
@@ -308,9 +338,20 @@ export default function App() {
     const unsubscribe = window.overlay?.onHidden?.(stopOnHide)
     return () => {
       unsubscribe?.()
+      audioGenerationRef.current += 1
       audioRef.current?.stop()
     }
   }, [])
+
+  useEffect(() => {
+    setShowSlashMenu(false)
+    if (activeTab === 'ask') return
+    audioGenerationRef.current += 1
+    audioRef.current?.stop()
+    audioRef.current = null
+    setListening(false)
+    setAudioChannels(null)
+  }, [activeTab])
 
   /* Auto-grow the textarea while typing. */
   useEffect(() => {
@@ -318,7 +359,7 @@ export default function App() {
     if (!el) return
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`
-  }, [input])
+  }, [input, activeTab])
 
   /* Respect the user's reduced-motion preference for both CSS and GSAP. */
   useEffect(() => {
@@ -335,17 +376,18 @@ export default function App() {
   /* Keep the latest message in view while streaming - but only when the user
      is already near the bottom, so scrolling up to re-read isn't hijacked. */
   useEffect(() => {
+    if (activeTab !== 'ask') return
     const list = listRef.current
     const nearBottom = !list || list.scrollHeight - list.scrollTop - list.clientHeight < 48
     if (nearBottom) {
       listEndRef.current?.scrollIntoView({ behavior: reducedMotionRef.current ? 'auto' : 'smooth', block: 'end' })
     }
-  }, [messages])
+  }, [messages, activeTab])
 
   /* Re-check fit whenever visible content changes (banners, thumbnails...). */
   useEffect(() => {
     autoGrow()
-  }, [messages, error, screenContext, streaming, input, showSlashMenu, preparingSubmit, autoGrow])
+  }, [messages, error, screenContext, streaming, input, showSlashMenu, preparingSubmit, activeTab, autoGrow])
 
   /* GSAP scope: selector text and contextSafe animations stay inside the card
      and are auto-cleaned on unmount. */
@@ -409,6 +451,7 @@ export default function App() {
   /* ----------------------- audio loopback ------------------------- */
 
   const stopListening = () => {
+    audioGenerationRef.current += 1
     audioRef.current?.stop()
     audioRef.current = null
     setListening(false)
@@ -454,23 +497,31 @@ export default function App() {
     }
     audioActionRef.current = true
     setAudioBusy(true)
+    const generation = ++audioGenerationRef.current
     try {
-      // Recording keeps running while the overlay is hidden (the renderer
-      // stays alive in the tray), so transcripts accumulate in the background.
-      audioRef.current = await startAudioLoopback({
+      const controller = await startAudioLoopback({
         onReady: (channels) => {
+          if (generation !== audioGenerationRef.current) return
           setAudioChannels(channels)
           setListening(true)
         },
-        onTranscript: (text) => setInput((prev) => (prev ? `${prev} ${text}` : text)),
-        onError: (message) => setError(message),
+        onTranscript: (text) => {
+          if (generation === audioGenerationRef.current) setInput((prev) => (prev ? `${prev} ${text}` : text))
+        },
+        onError: (message) => {
+          if (generation === audioGenerationRef.current) setError(message)
+        },
         onEnded: (reason) => {
+          if (generation !== audioGenerationRef.current) return
           audioRef.current = null
           setListening(false)
           setAudioChannels(null)
           setError(reason)
         }
       })
+      // Dismissal/tab change can happen while permission or device setup waits.
+      if (generation !== audioGenerationRef.current) controller.stop()
+      else audioRef.current = controller
     } catch (err) {
       audioRef.current = null
       setListening(false)
@@ -588,9 +639,21 @@ export default function App() {
     setPreparingSubmit(true)
     setError(null)
     setFailedRequest(null)
+    setNotice(null)
     setShowSlashMenu(false)
 
     try {
+      const local = await executeLocalCommand(text, window.overlay)
+      if (local) {
+        setInput('')
+        if (local.type === 'files') {
+          setFileSearchRequest((previous) => ({ query: local.query, id: (previous?.id ?? 0) + 1 }))
+        } else {
+          setCreatedTask(local.task)
+        }
+        setActiveTab(local.type)
+        return
+      }
       // --- slash commands: /recall (RAG), /code + /explain (screen vision) ---
       let outgoing = text
       let displayText = null
@@ -711,6 +774,7 @@ export default function App() {
   }
 
   const onKeyDown = (e) => {
+    if (e.nativeEvent.isComposing || (e.key === 'Enter' && e.shiftKey)) return
     if (showSlashMenu && slashCommands.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -757,7 +821,7 @@ export default function App() {
 
   return (
     <div ref={cardRef} className="flex h-full max-h-full w-full flex-col overflow-hidden p-1.5">
-      <div ref={cardPanelRef} className="flex h-full w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-neutral-900/90 shadow-2xl shadow-black/60 backdrop-blur-xl will-change-transform">
+        <div ref={cardPanelRef} className="flex h-full w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-neutral-900/90 shadow-2xl shadow-black/60 backdrop-blur-xl will-change-transform">
 
         {/* -------- drag bar (moves the frameless window) -------- */}
         <div
@@ -768,6 +832,37 @@ export default function App() {
         </div>
 
         <div ref={contentRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div role="tablist" aria-label="Aura sections" className="flex shrink-0 gap-1 border-b border-white/5 px-3 pb-1 pt-1">
+            {[
+              { id: 'ask', label: 'Ask' },
+              { id: 'files', label: 'Files' },
+              { id: 'tasks', label: 'Tasks' }
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                aria-controls={`${tab.id}-panel`}
+                onClick={() => setActiveTab(tab.id)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+                  event.preventDefault()
+                  const tabs = ['ask', 'files', 'tasks']
+                  const offset = event.key === 'ArrowRight' ? 1 : -1
+                  const next = tabs[(tabs.indexOf(activeTab) + offset + tabs.length) % tabs.length]
+                  setActiveTab(next)
+                  requestAnimationFrame(() => event.currentTarget.parentElement?.querySelector(`[data-tab="${next}"]`)?.focus())
+                }}
+                data-tab={tab.id}
+                className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${activeTab === tab.id ? 'bg-indigo-400/15 text-indigo-100' : 'text-neutral-400 hover:bg-white/5 hover:text-neutral-200'}`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div id="ask-panel" role="tabpanel" aria-label="Ask the AI" hidden={activeTab !== 'ask'} className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {/* -------- compact conversation controls -------- */}
           <div className="flex shrink-0 items-center justify-between gap-2 px-4 pb-1 pt-0.5">
             <div className="flex min-w-0 items-center gap-2">
@@ -1117,9 +1212,18 @@ export default function App() {
         <div id="composer-hints" className="shrink-0 px-4 pb-2 text-center text-[10px] text-neutral-400">
           Enter send &middot; Shift+Enter newline &middot; / commands &middot; Esc hide &middot; Ctrl+Shift+Space summon &middot; Ctrl+Shift+U stealth &middot; drag edges to resize
         </div>
-        <div className="sr-only" aria-live="polite">
-          {preparingSubmit ? 'Preparing your message.' : streaming ? 'Assistant is responding.' : error ? 'There is an error with the current request.' : ''}
-        </div>
+         <div className="sr-only" aria-live="polite">
+           {preparingSubmit ? 'Preparing your message.' : streaming ? 'Assistant is responding.' : error ? 'There is an error with the current request.' : ''}
+         </div>
+          </div>
+
+          <div id="files-panel" role="tabpanel" aria-label="Find local files" hidden={activeTab !== 'files'} className="min-h-0 flex-1 overflow-hidden">
+            <FilesPanel active={activeTab === 'files'} searchRequest={fileSearchRequest} />
+          </div>
+
+          <div id="tasks-panel" role="tabpanel" aria-label="Local tasks" hidden={activeTab !== 'tasks'} className="min-h-0 flex-1 overflow-hidden">
+            <TasksPanel active={activeTab === 'tasks'} createdTask={createdTask} />
+          </div>
         </div>
       </div>
     </div>

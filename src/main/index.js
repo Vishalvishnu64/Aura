@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, desktopCapturer, screen, nativeImage, shell } from 'electron'
+import { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, desktopCapturer, screen, nativeImage, shell, dialog } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
@@ -11,6 +11,25 @@ import {
   clearMemory,
   onMemoryStatus
 } from './memoryService'
+import {
+  initTasksService,
+  stopTasksService,
+  listTasks,
+  createTask,
+  updateTask,
+  deleteTask,
+  clearCompletedTasks
+} from './tasksService'
+import {
+  initFileService,
+  getAuthorizedFolders,
+  addAuthorizedFolder,
+  removeAuthorizedFolder,
+  searchFiles,
+  openFile,
+  revealFile,
+  copyFilePath
+} from './fileService'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -469,7 +488,7 @@ function createWindow() {
 
   // Blur-to-hide: clicking anywhere outside the overlay dismisses it
   win.on('blur', () => {
-    if (!blurGuard && !isQuitting && win.isVisible()) win.hide()
+    if (!blurGuard && !isQuitting && win.isVisible()) hideWindow()
   })
 
   // Self-heal: if the renderer ever dies (crash, OOM, ...), reload it instead
@@ -636,7 +655,7 @@ function registerIpc() {
     const [x, y] = win.getPosition() // keep top-left anchored
     const { width } = win.getBounds() // preserve user-chosen width
     win.setBounds({ x, y, width, height: nextHeight })
-    return true
+    return { ok: true, height: nextHeight, maxHeight }
   })
 
   /**
@@ -709,6 +728,67 @@ function registerIpc() {
   ipcMain.handle('get-capture-status', (event) => {
     if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
     return getCaptureStatus()
+  })
+
+  // -------------------------------------------------------------------------
+  // Local files: every operation is restricted to user-authorized folders.
+  // -------------------------------------------------------------------------
+  ipcMain.handle('files:get-folders', (event) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return getAuthorizedFolders()
+  })
+  ipcMain.handle('files:pick-folder', async (event) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Choose a folder Aura can search',
+      properties: ['openDirectory', 'createDirectory']
+    })
+    if (result.canceled || !result.filePaths[0]) return getAuthorizedFolders()
+    return addAuthorizedFolder(result.filePaths[0])
+  })
+  ipcMain.handle('files:remove-folder', (event, folderPath) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return removeAuthorizedFolder(folderPath)
+  })
+  ipcMain.handle('files:search', async (event, query) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return searchFiles(query)
+  })
+  ipcMain.handle('files:open', async (event, filePath) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return openFile(filePath)
+  })
+  ipcMain.handle('files:reveal', async (event, filePath) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return revealFile(filePath)
+  })
+  ipcMain.handle('files:copy-path', async (event, filePath) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return copyFilePath(filePath)
+  })
+
+  // -------------------------------------------------------------------------
+  // Local tasks: stored separately from screen memory and never sent to AI.
+  // -------------------------------------------------------------------------
+  ipcMain.handle('tasks:list', (event) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return listTasks()
+  })
+  ipcMain.handle('tasks:create', (event, title) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return createTask(title)
+  })
+  ipcMain.handle('tasks:update', (event, id, patch) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return updateTask(id, patch)
+  })
+  ipcMain.handle('tasks:delete', (event, id) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return deleteTask(id)
+  })
+  ipcMain.handle('tasks:clear-completed', (event) => {
+    if (!isTrustedRenderer(event)) throw new Error('Untrusted renderer')
+    return clearCompletedTasks()
   })
 
   /**
@@ -791,6 +871,16 @@ if (!app.requestSingleInstanceLock()) {
     } catch (err) {
       console.warn('[memory] init failed:', err.message)
     }
+    try {
+      initTasksService()
+    } catch (err) {
+      console.warn('[tasks] init failed:', err.message)
+    }
+    try {
+      initFileService()
+    } catch (err) {
+      console.warn('[files] init failed:', err.message)
+    }
     createTray()
 
     const registerShortcut = (key, status, callback) => {
@@ -824,6 +914,7 @@ if (!app.requestSingleInstanceLock()) {
     for (const request of activeChatRequests.values()) request.controller.abort()
     activeChatRequests.clear()
     stopMemoryService()
+    stopTasksService()
   })
 
   app.on('window-all-closed', () => {

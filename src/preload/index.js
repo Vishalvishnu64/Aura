@@ -16,7 +16,7 @@ contextBridge.exposeInMainWorld('overlay', {
   /** Capture the active display; resolves with a base64 PNG data URL. */
   captureScreen: () => ipcRenderer.invoke('capture-screen'),
 
-  /** Grow/shrink the frameless window to fit the chat content. */
+  /** Grow/shrink the frameless window to fit the active panel. */
   resizeWindow: (height) => ipcRenderer.invoke('resize-window', height),
 
   /** Stealth mode: pass true/false to toggle capture-exclusion, nothing to query. */
@@ -59,6 +59,22 @@ contextBridge.exposeInMainWorld('overlay', {
 
   /** Full-text search over the photographic-memory index. */
   searchMemory: (keyword) => ipcRenderer.invoke('search-memory', keyword),
+
+  /** Authorized local-file search and safe file actions. */
+  filesGetFolders: () => ipcRenderer.invoke('files:get-folders'),
+  filesPickFolder: () => ipcRenderer.invoke('files:pick-folder'),
+  filesRemoveFolder: (folderPath) => ipcRenderer.invoke('files:remove-folder', folderPath),
+  filesSearch: (query) => ipcRenderer.invoke('files:search', query),
+  filesOpen: (filePath) => ipcRenderer.invoke('files:open', filePath),
+  filesReveal: (filePath) => ipcRenderer.invoke('files:reveal', filePath),
+  filesCopyPath: (filePath) => ipcRenderer.invoke('files:copy-path', filePath),
+
+  /** Local checklist persistence. */
+  tasksList: () => ipcRenderer.invoke('tasks:list'),
+  tasksCreate: (title) => ipcRenderer.invoke('tasks:create', title),
+  tasksUpdate: (id, patch) => ipcRenderer.invoke('tasks:update', id, patch),
+  tasksDelete: (id) => ipcRenderer.invoke('tasks:delete', id),
+  tasksClearCompleted: () => ipcRenderer.invoke('tasks:clear-completed'),
 
   /**
    * Fired by main every time the overlay is summoned via hotkey/tray,
